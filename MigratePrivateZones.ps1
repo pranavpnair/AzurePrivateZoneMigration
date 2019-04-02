@@ -10,7 +10,7 @@ Y - Continue with only the next step of the operation.
 A - Continue with all the steps of the operation.
 N - Skip this operation and proceed with the next operation.
 L - Skip this operation and all subsequent operations.
-S - Pause the current pipeline and return to the command prompt. Type "exit" to resume the pipeline.'''
+S - Pause the current pipeline.'''
 
 $choice = @('L','l','a','A','n','N','y','Y')
 
