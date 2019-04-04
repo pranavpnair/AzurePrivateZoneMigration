@@ -1,3 +1,8 @@
+##############################################################################
+Copyright (c) Microsoft Corporation.  All rights reserved.
+##############################################################################
+
+
 param(
     [Parameter(Mandatory=$true)] [ValidateNotNullOrEmpty()] [string] $subscriptionId
 )
