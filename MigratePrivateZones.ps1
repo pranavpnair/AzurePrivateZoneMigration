@@ -7,7 +7,7 @@ param(
     [Parameter(Mandatory=$true)] [ValidateNotNullOrEmpty()] [string] $subscriptionId
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Inquire"
 
 Import-Module Az.Dns
 Import-Module Az.PrivateDns
@@ -117,7 +117,7 @@ function MigrateSinglePrivateZone($privateZone)
         Exit-PSSession
     }
 
-    Out-File -FilePath .\privatezone.txt
+    #Out-File -FilePath .\privatezone.txt
     Write-Host "Attempting to create new Private DNS Zone $($privateZone.Name) and migrating corresponding RecordSets from the old model...`n"
 
     $migratedZone = Get-AzPrivateDnsZone -ResourceGroupName $privateZone.ResourceGroupName -Name $privateZone.Name -ErrorVariable notPresent -ErrorAction SilentlyContinue
@@ -294,6 +294,7 @@ function RemoveVirtualNetworkFromPrivateZone($privateZone, $firstId, $restIds, $
 }
 
 
+mkdir "ZoneData"
 Login-AzAccount -Subscription $subscriptionId | Out-Null
 $privateZones = Get-AzDnsZone | Where-Object {$_.ZoneType -eq "Private"}
 
@@ -310,8 +311,8 @@ Write-Host "Migrating existing Private DNS zones to the new model...`n"
 
 :loop1 foreach($privateZone in $privateZones)
 {
-    do {
-        #change default
+    do 
+    {
         Write-Host -ForegroundColor Green "Do you want to migrate the following privatezone?"
         Write-Output $privateZone
         Write-Host -ForegroundColor Green "[Y] Yes  [A] Yes to All  [N] No  [L] No to All  [S] Suspend  [?] Help:`n"
@@ -335,7 +336,8 @@ Write-Host "Attempting to switch DNS resolution to the new model...`n"
 
 :loop2 foreach($privateZone in $privateZones)
 {
-    Out-File -FilePath .\privatezone.txt
+    $fileName = "$($privatezone.ResourceGroupName)-$($privatezone.Name)-switch.txt"
+    Out-File -FilePath "ZoneData/$fileName"
     Write-Host "Switching DNS resolution for the Private DNS Zone $($privateZone.Name) with the following properties:"
     Write-Output $privateZone
     $resolutionVnetIds = $privateZone.ResolutionVirtualNetworkIds
@@ -378,7 +380,6 @@ Write-Host "Attempting to switch DNS resolution to the new model...`n"
 
 
 #cleanup
-
 Write-Host "Entering cleanup phase to remove all Private DNS Zones post migration and DNS resolution switch...`n"
 
 :loop3 foreach($privateZone in $privateZones)
@@ -390,7 +391,8 @@ Write-Host "Entering cleanup phase to remove all Private DNS Zones post migratio
         continue
     }
 
-    Out-File -FilePath .\privatezone.txt
+    $fileName = "$($privatezone.ResourceGroupName)-$($privatezone.Name)-cleanup.txt"
+    Out-File -FilePath "ZoneData/$fileName"
     $migratedZone = Get-AzPrivateDnsZone -Name $privateZone.Name -ResourceGroupName $privateZone.ResourceGroupName
     Assert-AreEqual $migratedZone.NumberOfRecordSets $privateZone.NumberOfRecordSets
     
