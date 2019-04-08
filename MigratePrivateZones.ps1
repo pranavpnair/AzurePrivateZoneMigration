@@ -7,6 +7,8 @@ param(
     [Parameter(Mandatory=$true)] [ValidateNotNullOrEmpty()] [string] $subscriptionId
 )
 
+$ErrorActionPreference = "Stop"
+
 Import-Module Az.Dns
 Import-Module Az.PrivateDns
 
@@ -196,6 +198,37 @@ function CreateVirtualNetworkLinks($privateZone)
     Write-Host "VirtualNetwork Links successfully created for the Private DNS Zone.`n"
 }
 
+function VerifyDnsResolution($privateZone, $firstId, $restIds, $isRegistration)
+{
+    $privateZone = Get-AzDnsZone -Name $privateZone.Name -ResourceGroupName $privateZone.ResourceGroupName
+
+    do{
+        Write-Host "Please wait for a few minutes and verify DNS resolution for all virtual machines that were previously present in the virtual network $firstId. Does DNS resolution work as expected? [Y/N]`n"
+        $confirm = Read-Host
+        switch ($confirm.ToUpper())
+        {
+            'Y' { continue }
+            'N' {
+                    $vnetIds = @()
+                    $vnetIds += $firstId
+                    $vnetIds += $restIds
+                    if($isRegistration)
+                    {
+                        $privateZone.RegistrationVirtualNetworkIds = $vnetIds
+                    }
+                    else 
+                    {
+                        $privateZone.ResolutionVirtualNetworkIds = $vnetIds    
+                    }
+
+                    Set-AzDnsZone -Zone $privateZone
+                    Write-Host "Please file a support request to migrate the virtual Network $firstId for the Private DNS Zone $($privateZone.Name).`n"
+                    Exit-PSSession
+                }
+        }
+    } until($confirm.ToUpper() -eq 'Y' -or $confirm.ToUpper() -eq 'N')
+}
+
 
 function RemoveVirtualNetworkFromPrivateZone($privateZone, $firstId, $restIds, $isRegistration)
 {
@@ -209,51 +242,55 @@ function RemoveVirtualNetworkFromPrivateZone($privateZone, $firstId, $restIds, $
         $confirmation = Read-Host
         switch ($confirmation.ToUpper()) 
         {
-            'L' { break loop2 }
+            'L' { return 1 }
             'A' { 
-                if($isRegistration)
-                {
-                    $privateZone.RegistrationVirtualNetworkIds = @()
-                }
-                else 
-                {
-                    $privateZone.ResolutionVirtualNetworkIds = @()
-                }
+                    if($isRegistration)
+                    {
+                        $privateZone.RegistrationVirtualNetworkIds = @()
+                    }
+                    else 
+                    {
+                        $privateZone.ResolutionVirtualNetworkIds = @()
+                    }
 
-                Set-AzDnsZone -Zone $privateZone | Out-Null
-                #below does not match design ask.
-                Write-Host "Please wait X minutes and verify DNS resolution for all virtual networks that were previously present in this Private DNS Zone. If the resolution fails, please file a support ticket.`n"
-                pause
-                break loop3
-            }
+                    Set-AzDnsZone -Zone $privateZone | Out-Null
+                    VerifyDnsResolution $privateZone $firstId $restIds $isRegistration
+                    pause
+                    break loop3
+                }
             'N' { break }
             'Y' {
-                if([string]::IsNullOrEmpty($restIds))
-                {
-                    $restIds = @()
-                }
+                    if([string]::IsNullOrEmpty($restIds))
+                    {
+                        $restIds = @()
+                    }
 
-                if($isRegistration)
-                {
-                    $privateZone.RegistrationVirtualNetworkIds = $restIds
-                }
-                else
-                {
-                    $privateZone.ResolutionVirtualNetworkIds = $restIds
-                }
+                    if($isRegistration)
+                    {
+                        $privateZone.RegistrationVirtualNetworkIds = $restIds
+                    }
+                    else
+                    {
+                        $privateZone.ResolutionVirtualNetworkIds = $restIds
+                    }
 
-                Set-AzDnsZone -Zone $privateZone | Out-Null
-                Write-Host "Please wait X minutes and verify DNS resolution for the virtual network $firstId. If the resolution fails, please file a support ticket.`n"
-                pause
-                break 
-            }
+                    Set-AzDnsZone -Zone $privateZone | Out-Null
+                    VerifyDnsResolution $privateZone $firstId $restIds $isRegistration
+                    pause
+                    break 
+                }
             'S' { 
-                pause;
-                break 
-            }
-            '?' {Write-Host $helpmsg ; break}
+                    pause;
+                    break 
+                }
+            '?' { 
+                    Write-Host $helpmsg;
+                    break
+                }
         }
     } until ($choice -contains $confirmation)
+
+    return 0
 }
 
 
@@ -275,20 +312,20 @@ Write-Host "Migrating existing Private DNS zones to the new model...`n"
 {
     do {
         #change default
-    Write-Host -ForegroundColor Green "Do you want to migrate the following privatezone?"
-    Write-Output $privateZone
-    Write-Host -ForegroundColor Green "[Y] Yes  [A] Yes to All  [N] No  [L] No to All  [S] Suspend  [?] Help:`n"
-    $confirmation = Read-Host
+        Write-Host -ForegroundColor Green "Do you want to migrate the following privatezone?"
+        Write-Output $privateZone
+        Write-Host -ForegroundColor Green "[Y] Yes  [A] Yes to All  [N] No  [L] No to All  [S] Suspend  [?] Help:`n"
+        $confirmation = Read-Host
 
-    switch ($confirmation.ToUpper()) 
-    {
-        'L' { break loop1 ; break }
-        'A' { MigrateAllPrivateZones $privateZones ; break loop1 }
-        'N' { break }
-        'Y' { MigrateSinglePrivateZone $privateZone ; break }
-        'S' { pause }
-        '?' {Write-Host $helpmsg ; break}
-    }
+        switch ($confirmation.ToUpper()) 
+        {
+            'L' { break loop1 ; break }
+            'A' { MigrateAllPrivateZones $privateZones ; break loop1 }
+            'N' { break }
+            'Y' { MigrateSinglePrivateZone $privateZone ; break }
+            'S' { pause }
+            '?' {Write-Host $helpmsg ; break}
+        }
     } until ($choice -contains $confirmation)
 }
 
@@ -296,14 +333,14 @@ Write-Host "Migrating existing Private DNS zones to the new model...`n"
 #switch phase
 Write-Host "Attempting to switch DNS resolution to the new model...`n"
 
-foreach($privateZone in $privateZones)
+:loop2 foreach($privateZone in $privateZones)
 {
     Out-File -FilePath .\privatezone.txt
     Write-Host "Switching DNS resolution for the Private DNS Zone $($privateZone.Name) with the following properties:"
     Write-Output $privateZone
     $resolutionVnetIds = $privateZone.ResolutionVirtualNetworkIds
     $firstId , $restIds = $resolutionVnetIds
-    :loop2 while(!($null -eq $firstId))
+    while(!($null -eq $firstId))
     {
         $name = $firstId.Split('/')[-1] + "-Link"
         $resolutionVnetLink = Get-AzPrivateDnsVirtualNetworkLink -Name $name -ZoneName $privateZone.Name -ResourceGroupName $privateZone.ResourceGroupName
@@ -311,13 +348,17 @@ foreach($privateZone in $privateZones)
         Assert-AreEqual $resolutionVnetLink.RegistrationEnabled $false
         Assert-AreEqual $resolutionVnetLink.ProvisioningState "Succeeded"
 
-        RemoveVirtualNetworkFromPrivateZone $privateZone $firstId $restIds $false
+        if(RemoveVirtualNetworkFromPrivateZone $privateZone $firstId $restIds $false)
+        {
+            break loop2
+        }
+
         $firstId , $restIds = $restIds
     }
 
     $registrationVnetIds = $privateZone.RegistrationVirtualNetworkIds
     $firstId , $restIds = $registrationVnetIds
-    :loop3 while(!($null -eq $firstId))
+    while(!($null -eq $firstId))
     {
         $name = $firstId.Split('/')[-1] + "-Link"
         $registrationVnetLink = Get-AzPrivateDnsVirtualNetworkLink -Name $name -ZoneName $privateZone.Name -ResourceGroupName $privateZone.ResourceGroupName
@@ -326,7 +367,11 @@ foreach($privateZone in $privateZones)
         Assert-AreEqual $registrationVnetLink.ProvisioningState "Succeeded"
         Assert-AreEqual $registrationVnetLink.VirtualNetworkLinkState "Completed"
 
-        RemoveVirtualNetworkFromPrivateZone $privateZone $firstId $restIds $true
+        if(RemoveVirtualNetworkFromPrivateZone $privateZone $firstId $restIds $true)
+        {
+            break loop2
+        }
+
         $firstId , $restIds = $restIds
     }
 }
@@ -336,7 +381,7 @@ foreach($privateZone in $privateZones)
 
 Write-Host "Entering cleanup phase to remove all Private DNS Zones post migration and DNS resolution switch...`n"
 
-:loop4 foreach($privateZone in $privateZones)
+:loop3 foreach($privateZone in $privateZones)
 {
     $privateZone = Get-AzDnsZone -Name $privateZone.Name -ResourceGroupName $privateZone.ResourceGroupName
     if($privateZone.RegistrationVirtualNetworkIds.Count -gt 0 -or $privateZone.ResolutionVirtualNetworkIds.Count -gt 0)
@@ -358,7 +403,7 @@ Write-Host "Entering cleanup phase to remove all Private DNS Zones post migratio
         switch ($confirmation.ToUpper()) 
         {
             'L' { Exit-PSSession }
-            'A' { DeleteAllPrivateZones $privateZones ; break loop4 }
+            'A' { DeleteAllPrivateZones $privateZones ; break loop3 }
             'N' { break }
             'Y' { DeleteSinglePrivateZone $privateZone ; break }
             'S' { pause }
