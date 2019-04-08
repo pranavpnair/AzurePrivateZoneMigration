@@ -7,7 +7,7 @@ param(
     [Parameter(Mandatory=$true)] [ValidateNotNullOrEmpty()] [string] $subscriptionId
 )
 
-$ErrorActionPreference = "Inquire"
+$ErrorActionPreference = "Stop"
 
 Import-Module Az.Dns
 Import-Module Az.PrivateDns
