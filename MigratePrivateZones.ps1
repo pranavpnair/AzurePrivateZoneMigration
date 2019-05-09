@@ -2,15 +2,29 @@
 ## Copyright (c) Microsoft Corporation.  All rights reserved.
 ##############################################################################
 
+# SYNOPSIS: The following script migrates all Private DNS zones from legacy model to the new model under a given Azure Subscription.
+# --------------------------------------------------------------------------------------------------------------------------------------------------
+# <PARAMETERS>
+# SubsciptionId: (Mandatory) Enter the subscription ID where the migration of Private DNS zones from legacy to new model needs to happen. 
+# DumpPath: (Not Mandatory) Enter the dump location that this script will use to dump Private DNS zone data. 
+# Force: (Not Mandatory) Switch parameter, please use this is you have filed a support request and subscription limits have been already increased.
+# --------------------------------------------------------------------------------------------------------------------------------------------------
+
 
 param(
-    [Parameter(Mandatory=$true)] [ValidateNotNullOrEmpty()] [string] $subscriptionId
+    [Parameter(Mandatory=$true)] [ValidateNotNullOrEmpty()] [string] $SubscriptionId,
+    [Parameter(Mandatory=$false)] [ValidateNotNullOrEmpty()] [string] $DumpPath = "$env:temp\PrivateZoneData",
+    [Parameter(Mandatory=$false)] [switch] $Force
 )
 
 $ErrorActionPreference = "Stop"
 
 Import-Module Az.Dns
 Import-Module Az.PrivateDns
+
+Set-Alias -Name Set-AzPrivateDnsZone -Value Update-AzPrivateDnsZone
+Set-Alias -Name Set-AzPrivateDnsRecordSet -Value Update-AzPrivateDnsRecordSet
+Set-Alias -Name Set-AzPrivateDnsVirtualNetworkLink -Value Update-AzPrivateDnsVirtualNetworkLink
 
 $helpmsg = '''
 Y - Continue with only the next step of the operation.
@@ -21,19 +35,15 @@ S - Pause the current pipeline.'''
 
 $choice = @('L','l','a','A','n','N','y','Y')
 
-function Assert-AreEqual($a,$b)
-{
-    if($a -eq $b)
-    {
-        return
-    }
-
-    Write-Error "Assertion Failed. $a is not equal to $b."
-    Exit-PSSession
-}
-
 function MigrateAllPrivateZones($privateZones)
 {
+    <#
+    .SYNOPSIS
+     Auxiliary function to migrate all Private DNS zones in a subscription.
+    .PARAMETER privateZones
+     Specifies the Private DNS zone list. 
+    #>
+
     foreach($privateZone in $privateZones)
     {
         MigrateSinglePrivateZone($privateZone)
@@ -42,15 +52,28 @@ function MigrateAllPrivateZones($privateZones)
 
 function DeleteAllPrivateZones($privateZones)
 {
+    <#
+    .SYNOPSIS
+     Auxiliary function to delete all Private DNS zones in a subscription.
+    .PARAMETER privateZones
+     Specifies the Private DNS zone list. 
+    #>
+
     foreach($privateZone in $privateZones)
     {
         DeleteSinglePrivateZone($privateZone)
     }
 }
 
-
 function CreateRecordConfig($recordSet)
 {
+    <#
+    .SYNOPSIS
+     Function that creates a record list of a particular type within a recordSet. Used to create RecordSets in the new Private DNS zone that will be created.
+    .PARAMETER recordSet
+     Specifies the recordSet that has the record data.
+    #>
+
     $oldRecords = $recordSet.Records
     $newRecords = @()
     switch($recordSet.RecordType)
@@ -109,90 +132,260 @@ function CreateRecordConfig($recordSet)
     return $newRecords
 }
 
+function CreateRecordSets($privateZone, $migratedZone)
+{
+    <#
+    .SYNOPSIS
+     Function to create record sets in a Private DNS zone.
+    .PARAMETER privateZone
+     Specifies the Private DNS zone under which the record sets will be created.
+    #>
+
+    Write-Host "Attempting migration of RecordSets in the Private DNS zone $($privateZone.Name)...`n"
+    $recordSets = Get-AzDnsRecordSet -ZoneName $privateZone.Name -ResourceGroupName $privateZone.ResourceGroupName
+    $fileName = "$($privateZone.ResourceGroupName)-$($privateZone.Name)-recordSets.txt"
+    $recordSets | Out-File -FilePath "$DumpPath/$fileName"
+
+    foreach($recordSet in $recordSets)
+    {   
+        $existingRecordSet = Get-AzPrivateDnsRecordSet -Zone $migratedZone -Name $recordSet.Name -RecordType $recordSet.RecordType.ToString() -ErrorVariable notPresent -ErrorAction SilentlyContinue
+        if($recordSet.RecordType.ToString() -eq 'SOA')
+        {
+            $existingRecordSet.Metadata = $recordSet.Metadata
+            $existingRecordSet.Ttl = $recordSet.Ttl
+            $existingRecordSet.Records[0].Host = $recordSet.Records[0].Host
+            $existingRecordSet.Records[0].Email = $recordSet.Records[0].Email
+            $existingRecordSet.Records[0].SerialNumber = $recordSet.Records[0].SerialNumber
+            $existingRecordSet.Records[0].RefreshTime = $recordSet.Records[0].RefreshTime
+            $existingRecordSet.Records[0].RetryTime = $recordSet.Records[0].RetryTime
+            $existingRecordSet.Records[0].ExpireTime = $recordSet.Records[0].ExpireTime
+            $existingRecordSet.Records[0].MinimumTtl = $recordSet.Records[0].MinimumTtl
+            Set-AzPrivateDnsRecordSet -RecordSet $existingRecordSet
+            continue
+        }
+
+        if([string]::IsNullOrEmpty($notPresent))
+        {
+            do {
+                Write-Host -ForegroundColor Yellow "RecordSet $($recordSet.Name) already exists in the Private DNS Zone. Do you still want to overwrite this recordset to match legacy data? [Y/N]`n"
+                $input = Read-Host
+                if($input -like 'N')
+                {
+                    continue
+                }
+                elseif($input -like 'Y')
+                {
+                    $existingRecordSet.Ttl = $recordSet.Ttl
+                    $existingRecordSet.Metadata = $recordSet.Metadata
+                    $existingRecordSet.Records = CreateRecordConfig $recordSet
+                    Set-AzPrivateDnsRecordSet -RecordSet $existingRecordSet
+                    Write-Host "Overwrite of RecordSet $($RecordSet.Name) was successful.`n"
+                }
+
+            } until($input -like 'Y' -or $input -like 'N')
+        }
+        else
+        {
+            $recordConfig = CreateRecordConfig $recordSet
+            if($recordConfig)
+            {
+                New-AzPrivateDnsRecordSet -Name $recordSet.Name -Zone $migratedZone -RecordType $recordSet.RecordType.ToString() -Ttl $recordSet.Ttl -PrivateDnsRecord $recordConfig -Metadata $recordSet.Metadata
+            }
+            else
+            {
+                New-AzPrivateDnsRecordSet -Name $recordSet.Name -Zone $migratedZone -RecordType $recordSet.RecordType.ToString() -Ttl $recordSet.Ttl -Metadata $recordSet.Metadata
+            }
+            
+            Write-Host "Created new RecordSet $($recordSet.Name) under Private DNS Zone $($migratedZone.Name)`n"
+        }
+    }
+}
+
 function MigrateSinglePrivateZone($privateZone)
 {
-    if($privateZone.NumberOfRecordSets -gt 25000 -or $privateZone.ResolutionVirtualNetworkIds.Count -gt 100)
+    <#
+    .SYNOPSIS
+     Function to migrate a single Private DNS zone from legacy to new model.
+    .PARAMETER privateZones
+     Specifies the Private DNS zone object to be migrated.
+    #>
+
+    Write-Host "Attempting to migrate Private DNS zone $($privateZone.Name) in resource group $($privateZone.ResourceGroupName)"
+    $totalLinks = $privateZone.ResolutionVirtualNetworkIds.Count + $privateZone.RegistrationVirtualNetworkIds.Count
+    if($privateZone.NumberOfRecordSets -gt 25000 -or $totalLinks -gt 1000 -or $privateZone.RegistrationVirtualNetworkIds.Count -gt 100)
     {
-        Write-Error "Number of recordsets on this private zone = $($privateZone.NumberOfRecordSets). Number of resolution virtual network Ids on this private zone = $($privateZone.ResolutionVirtualNetworkIds.Count). These values are higher than normal limits of 25000 and 100 respectively. Please file a support request to migrate limits and re-run the script with Force parameter."
-        Exit-PSSession
+        if(!$Force.IsPresent)
+        {
+            Write-Error "Number of recordsets on this private zone = $($privateZone.NumberOfRecordSets). Total number of virtual network links on this private zone = $($totalLinks) .Number of registration virtual network Ids on this private zone = $($privateZone.ResolutionVirtualNetworkIds.Count). These values are higher than normal limits of 25000, 1000 and 100 respectively. Please file a support request to migrate subscription limits and re-run the script with Force parameter.`n"
+            Exit-PSSession
+        }
+        else 
+        {
+            Write-Warning "Number of recordsets on this private zone = $($privateZone.NumberOfRecordSets). Total number of virtual network links on this private zone = $($totalLinks) .Number of registration virtual network Ids on this private zone = $($privateZone.ResolutionVirtualNetworkIds.Count). These values are higher than normal limits of 25000, 1000 and 100 respectively. Force attempting migration...`n"  
+        }
     }
 
-    #Out-File -FilePath .\privatezone.txt
-    Write-Host "Attempting to create new Private DNS Zone $($privateZone.Name) and migrating corresponding RecordSets from the old model...`n"
+    Write-Host "Attempting to migrate new Private DNS Zone $($privateZone.Name) and migrating corresponding RecordSets from the old model...`n"
 
     $migratedZone = Get-AzPrivateDnsZone -ResourceGroupName $privateZone.ResourceGroupName -Name $privateZone.Name -ErrorVariable notPresent -ErrorAction SilentlyContinue
     if($notPresent)
     {
-        $migratedZone = New-AzPrivateDnsZone -Name $privateZone.Name -ResourceGroupName $privateZone.ResourceGroupName
+        $migratedZone = New-AzPrivateDnsZone -Name $privateZone.Name -ResourceGroupName $privateZone.ResourceGroupName -Tag $privateZone.Tags
     }
     else
     {
-        Write-Host "Private DNS Zone $($privateZone.Name) already exists. Attempting migration of RecordSets...`n"
+        $tagCheck = Compare-Object $migratedZone.Tags $privateZone.Tags
+        if($null -eq $tagCheck)
+        {
+            Write-Host "Private DNS Zone $($privateZone.Name) already exists.`n"
+        }
+        else 
+        {
+            do{
+                Write-Host -ForegroundColor Yellow  "Private DNS Zone $($privateZone.Name) already exists but tags do not match with legacy zone. Do you want to overwrite the tags with legacy data? [Y/N]`n"
+                $input = Read-Host
+                if($input -like 'N')
+                {
+                    continue
+                }
+                elseif($input -like 'Y')
+                {    
+                    $migratedZone.Tags = $privateZone.Tags
+                    Set-AzPrivateDnsZone -Zone $migratedZone
+                }
+            } until($input -like 'Y' -or $input -like 'N')
+
+        }
     }
 
-    $recordSets = Get-AzDnsRecordSet -ZoneName $privateZone.Name -ResourceGroupName $privateZone.ResourceGroupName
-    foreach($recordSet in $recordSets)
-    {   
-        if($recordSet.RecordType.ToString() -eq 'SOA')
-        {
-            continue
-        }
-
-        Get-AzPrivateDnsRecordSet -Zone $migratedZone -Name $recordSet.Name -RecordType $recordSet.RecordType.ToString() -ErrorVariable notPresent -ErrorAction SilentlyContinue
-        if([string]::IsNullOrEmpty($notPresent))
-        {
-            Write-Host "RecordSet $($recordSet.Name) already exists in the Private DNS Zone.`n"
-            continue
-        }
-
-        $recordConfig = CreateRecordConfig $recordSet
-        New-AzPrivateDnsRecordSet -Name $recordSet.Name -Zone $migratedZone -RecordType $recordSet.RecordType.ToString() -Ttl $recordSet.Ttl -PrivateDnsRecord $recordConfig
-        Write-Host "Created new RecordSet $($recordSet.Name) under Private DNS Zone $($migratedZone.Name)`n"
-    }
-
+    CreateRecordSets $privateZone $migratedZone
     CreateVirtualNetworkLinks $privateZone
     Write-Host "Migration of Private DNS Zone $($privateZone.Name) and its RecordSets under resource group $($privateZone.ResourceGroup) completed successfully.`n"
 }
 
 function DeleteSinglePrivateZone($privateZone)
 {
+    <#
+    .SYNOPSIS
+     Function to delete a single Private DNS zone.
+    .PARAMETER privateZone
+     Specifies the Private DNS zone to be deleted.
+    #>
+
+    $privateZone = Get-AzDnsZone -Name $privateZone.Name -ResourceGroupName $privateZone.ResourceGroupName
     Remove-AzDnsZone -Zone $privateZone -Confirm:$false
-    Write-Host "Successfully delete Private DNS Zone $($privateZone.Name) after migration to new model."
+    Write-Host "Successfully deleted Private DNS Zone $($privateZone.Name) after migration to new model.`n"
+}
+
+function CreateVirtualNetworkLinkName($vnetId)
+{
+    <#
+    .SYNOPSIS
+     Function that defines the name of a new virtual network link. Name format is <ResourceGroupName-Virtualnetwork-Link>.
+    .PARAMETER vnetId
+     Specifies the virtual network id that will be associated with the new virtual network link.
+    .PARAMETER isRegistration
+     Boolean that specifies if the virtual network link is registration or not.
+    #>
+
+    try 
+    {
+        $vnetId = $vnetId.ToLower()
+        return $vnetId.Split('/')[4] + "-" + $vnetId.Split('/')[-1] + "-link" 
+    }
+    catch 
+    {
+        Write-Error "Exception while parsing virtual network id: $vnetId. Please check the virtual network id provided and try again.`n"
+    }
 }
 
 function CreateVirtualNetworkLinks($privateZone)
 {
-    Write-Host "Creating VirtualNetwork Links for all resolution and registration virtual networks in the private zone:"
-    Write-Output $privateZone
+    <#
+    .SYNOPSIS
+     Function to create virtual network links in a Private DNS zone.
+    .PARAMETER privateZone
+     Specifies the Private DNS zone under which the virtual network links will be created.
+    #>
+
+    Write-Host "Creating VirtualNetwork Links for all resolution and registration virtual networks in the private zone: $($privateZone.Name) under resource group $($privateZone.ResourceGroupName)"
 
     $registrationVnetIds = $privateZone.RegistrationVirtualNetworkIds
     foreach($vnetId in $registrationVnetIds)
     {
-        $linkName = $vnetId.Split('/')[4]+ "-" + $vnetId.Split('/')[-1] + "-Link" 
-        Write-Host "Creating Registration VirtualNetwork Link with link name: $linkName for the following virtual network:$vnetId...`n"
-        Get-AzPrivateDnsVirtualNetworkLink -ResourceGroupName $privateZone.ResourceGroupName -Name $linkName -ZoneName $privateZone.Name -ErrorVariable notPresent -ErrorAction SilentlyContinue | Out-Null
-        if([string]::IsNullOrEmpty($notPresent))
+        $linkName = CreateVirtualNetworkLinkName $vnetId
+        Write-Host "Creating Registration VirtualNetwork Link with link name: $linkName for the following virtual network:$vnetId ...`n"
+        $existingVnetLink = Get-AzPrivateDnsVirtualNetworkLink -ResourceGroupName $privateZone.ResourceGroupName -Name $linkName -ZoneName $privateZone.Name -ErrorAction SilentlyContinue
+        if($existingVnetLink)
         {
-            Write-Host "VirtualNetwork Link $linkName is already present in the Private DNS Zone $($privateZone.Name).`n"
-            continue
+            if($existingVnetLink.RegistrationEnabled -eq $true -and $existingVnetLink.VirtualNetworkId -like $vnetId)
+            {
+                Write-Host "Virtual network Link $linkName is already present in the Private DNS Zone $($privateZone.Name).`n"
+                continue
+            }
+            else
+            {
+                do{
+                    Write-Output $existingVnetLink
+                    Write-Host -ForegroundColor Yellow "Registration virtual network link with the same name already exists in this Private DNS zone, but it does not have the same properties as the link from legacy zone. Do you want to overwrite this virtual network link with legacy data?[Y/N]"
+                    $confirm = Read-Host
+                    if($confirm -like 'N')
+                    {
+                        continue
+                    }
+                    elseif($confirm -like 'Y')
+                    {
+                        $existingVnetLink.RegistrationEnabled = $true
+                        $existingVnetLink.VirtualNetworkId = $vnetId
+                        Set-AzPrivateDnsVirtualNetworkLink -InputObject $existingVnetLink
+                        Write-Host "Overwrite of the virtual network link $($existingVnetLink.Name) was successful.`n"
+                    }
+                } until($confirm -like 'Y' -or $confirm -like 'N')
+            }
         }
-
-        New-AzPrivateDnsVirtualNetworkLink -ResourceGroupName $privateZone.ResourceGroupName -Name $linkName -ZoneName $privateZone.Name -VirtualNetworkId $vnetId -EnableRegistration
+        else
+        {
+            New-AzPrivateDnsVirtualNetworkLink -ResourceGroupName $privateZone.ResourceGroupName -Name $linkName -ZoneName $privateZone.Name -VirtualNetworkId $vnetId -EnableRegistration
+        }
     }
 
     $resolutionVnetIds = $privateZone.ResolutionVirtualNetworkIds
     foreach($vnetId in $resolutionVnetIds)
     {
-        $linkName = $vnetId.Split('/')[-1] + "-Link" 
+        $linkName = CreateVirtualNetworkLinkName $vnetId
         Write-Host "Creating Resolution VirtualNetwork Link with link name: $linkName for the following virtual network:$vnetId...`n"
-        Get-AzPrivateDnsVirtualNetworkLink -ResourceGroupName $privateZone.ResourceGroupName -Name $linkName -ZoneName $privateZone.Name -ErrorVariable notPresent -ErrorAction SilentlyContinue | Out-Null
-        if([string]::IsNullOrEmpty($notPresent))
+        $existingVnetLink = Get-AzPrivateDnsVirtualNetworkLink -ResourceGroupName $privateZone.ResourceGroupName -Name $linkName -ZoneName $privateZone.Name -ErrorAction SilentlyContinue
+        if($existingVnetLink)
         {
-            Write-Host "VirtualNetwork Link $linkName is already present in the Private DNS Zone $($privateZone.Name).`n"
-            continue
+            if($existingVnetLink.RegistrationEnabled -eq $false -and $existingVnetLink.VirtualNetworkId -like $vnetId)
+            {
+                Write-Host "Virtual network Link $linkName is already present in the Private DNS Zone $($privateZone.Name).`n"
+                continue
+            }
+            else
+            {
+                do{
+                    Write-Output $existingVnetLink
+                    Write-Host -ForegroundColor Yellow "Resolution virtual network link with the same name already exists in this Private DNS zone, but it does not have the same properties as the link from legacy zone. Do you want to overwrite this virtual network link with legacy data?[Y/N]"
+                    $confirm = Read-Host
+                    if($confirm -like 'N')
+                    {
+                        continue
+                    }
+                    elseif($confirm -like 'Y')
+                    {
+                        $existingVnetLink.RegistrationEnabled = $false
+                        $existingVnetLink.VirtualNetworkId = $vnetId
+                        Set-AzPrivateDnsVirtualNetworkLink -InputObject $existingVnetLink
+                        Write-Host "Overwrite of the virtual network link $($existingVnetLink.Name) was successful.`n"
+                    }
+                } until($confirm -like 'Y' -or $confirm -like 'N')
+            }
         }
-
-        New-AzPrivateDnsVirtualNetworkLink -ResourceGroupName $privateZone.ResourceGroupName -Name $linkName -ZoneName $privateZone.Name -VirtualNetworkId $vnetId
+        else
+        {
+            New-AzPrivateDnsVirtualNetworkLink -ResourceGroupName $privateZone.ResourceGroupName -Name $linkName -ZoneName $privateZone.Name -VirtualNetworkId $vnetId
+        }
     }
 
     Write-Host "VirtualNetwork Links successfully created for the Private DNS Zone.`n"
@@ -200,15 +393,29 @@ function CreateVirtualNetworkLinks($privateZone)
 
 function VerifyDnsResolution($privateZone, $firstId, $restIds, $isRegistration)
 {
+    <#
+    .SYNOPSIS
+     Function to confirm verification of DNS resolution for virtual machines in the virtual networks that have been migrated from legacy to new model.
+    .PARAMETER privateZone
+     Specifies the Private DNS zone which contains the virtual network link.
+    .PARAMETER firstId
+     Specifies the virtual network ID of the virtual network for which DNS resolution is being verified.
+    .PARAMETER restIds
+     List of virtual network ID's other than firstId linked to the Private DNS zone.
+    .PARAMETER isRegistration
+     Boolean indicating if the virtual network link containing firstId is registration or not.
+    #>
+
     $privateZone = Get-AzDnsZone -Name $privateZone.Name -ResourceGroupName $privateZone.ResourceGroupName
 
     do{
-        Write-Host "Please wait for a few minutes and verify DNS resolution for all virtual machines that were previously present in the virtual network $firstId. Does DNS resolution work as expected? [Y/N]`n"
+        Write-Host "Please wait for a few minutes and verify DNS resolution for all virtual machines in the virtual network $firstId. Does DNS resolution work as expected? [Y/N]`n"
         $confirm = Read-Host
         switch ($confirm.ToUpper())
         {
             'Y' { continue }
             'N' {
+                    Write-Host "Reverting changes to legacy Private DNS zone $($privateZone.Name) under resource group $($privateZone.ResourceGroupName).`n"
                     $vnetIds = @()
                     $vnetIds += $firstId
                     $vnetIds += $restIds
@@ -226,20 +433,53 @@ function VerifyDnsResolution($privateZone, $firstId, $restIds, $isRegistration)
                     Exit-PSSession
                 }
         }
-    } until($confirm.ToUpper() -eq 'Y' -or $confirm.ToUpper() -eq 'N')
+    } until($confirm -like 'Y' -or $confirm -like 'N')
 }
 
+function VerifyDnsResolutionAll($privateZone, $firstId, $restIds, $isRegistration)
+{
+    <#
+    .SYNOPSIS
+     Auxiliary function to confirm verification of DNS resolution for virtual machines in the virtual networks that have been migrated from legacy to new model.
+    .PARAMETER privateZone
+     Specifies the Private DNS zone which contains the virtual network link.
+    .PARAMETER firstId
+     Specifies the virtual network ID of the virtual network for which DNS resolution is being verified.
+    .PARAMETER restIds
+     List of virtual network ID's other than firstId linked to the Private DNS zone.
+    .PARAMETER isRegistration
+     Boolean indicating if the virtual network link containing firstId is registration or not.
+    #>
+
+    do{
+        VerifyDnsResolution $privateZone $firstId $restIds $isRegistration
+        $firstId , $restIds = $restIds
+    } while($firstId)
+}
 
 function RemoveVirtualNetworkFromPrivateZone($privateZone, $firstId, $restIds, $isRegistration)
 {
-    $privateZone = Get-AzDnsZone -Name $privateZone.Name -ResourceGroupName $privateZone.ResourceGroupName
+    <#
+    .SYNOPSIS
+     Function to remove a virtual network link from a Private DNS zone in the legacy model.
+    .PARAMETER privateZone
+     Specifies the legacy Private DNS zone which contains the virtual network link.
+    .PARAMETER firstId
+     Specifies the virtual network ID of the virtual network that is being removed.
+    .PARAMETER restIds
+     List of virtual network ID's other than firstId linked to the legacy Private DNS zone.
+    .PARAMETER isRegistration
+     Boolean indicating if the virtual network firstId is registration or not.
+    .OUTPUTS
+     Returns 1 if Yes to All/No to All operations are chosen, 0 otherwise. 
+    #>
 
+    $privateZone = Get-AzDnsZone -Name $privateZone.Name -ResourceGroupName $privateZone.ResourceGroupName
     do {
-        Write-Host -ForegroundColor Green "Do you want to remove the following virtual network from the Private DNS Zone $($privateZone.Name)?"
-        Write-Output $firstId
-        Write-Host -ForegroundColor Green "[Y] Yes  [A] Yes to All  [N] No  [L] No to All  [S] Suspend  [?] Help:`n"
-    
+        Write-Host -ForegroundColor Green "Do you want to remove the virtual network $firstId with auto-registration property $isRegistration from the Private DNS Zone $($privateZone.Name)?"
+        Write-Host -ForegroundColor Green "[Y] Yes  [A] Yes to All  [N] No  [L] No to All  [S] Suspend  [?] Help:`n"   
         $confirmation = Read-Host
+
         switch ($confirmation.ToUpper()) 
         {
             'L' { return 1 }
@@ -254,9 +494,9 @@ function RemoveVirtualNetworkFromPrivateZone($privateZone, $firstId, $restIds, $
                     }
 
                     Set-AzDnsZone -Zone $privateZone | Out-Null
-                    VerifyDnsResolution $privateZone $firstId $restIds $isRegistration
+                    VerifyDnsResolutionAll $privateZone $firstId $restIds $isRegistration
                     pause
-                    break loop3
+                    return 1
                 }
             'N' { break }
             'Y' {
@@ -293,64 +533,108 @@ function RemoveVirtualNetworkFromPrivateZone($privateZone, $firstId, $restIds, $
     return 0
 }
 
-
-mkdir "ZoneData"
-Login-AzAccount -Subscription $subscriptionId | Out-Null
-$privateZones = Get-AzDnsZone | Where-Object {$_.ZoneType -eq "Private"}
-
-if($privateZones.Count -gt 1000)
+# Create path to dump zone data.
+if(!(Test-Path -Path $DumpPath))
 {
-    Write-Error "More than 1000 Private Zones found. Please file a support request to migrate limits and re-run the script with Force parameter."
+    New-Item -ItemType directory -Path $DumpPath
+    Write-Host "New folder created: $DumpPath. This path will be the dump location for Private DNS zone data.`n"
+}
+else
+{
+    Write-Host "Folder $DumpPath already exists.`n"
+}
+
+Start-Transcript -path "$DumpPath\transcript.txt" -append
+
+Login-AzAccount -Subscription $SubscriptionId | Out-Null
+$legacyPrivateZones = Get-AzDnsZone | Where-Object { $_.ZoneType -eq "Private" }
+
+if($legacyPrivateZones.Count -eq 0)
+{
+    Write-Host "There are no legacy Private DNS zones in this subscription. Exiting...`n"
     Exit-PSSession
 }
 
-Write-Host "Found $($privateZones.Count) Private DNS Zones in the subscription $subscriptionId`n"
+if($legacyPrivateZones.Count -gt 1000)
+{
+    if(!$Force.IsPresent)
+    {
+        Write-Error "More than 1000 legacy Private DNS zones found. Please file a support request to migrate subscription limits and re-run the script with Force parameter.`n"
+        Exit-PSSession
+    }
+    else 
+    {
+        Write-Warning "More than 1000 legacy Private DNS zones found. Continuing with migration process as Force parameter is specified...`n"   
+    }
+}
 
-#migrate phase
-Write-Host "Migrating existing Private DNS zones to the new model...`n"
+Write-Host "Found $($legacyPrivateZones.Count) legacy Private DNS Zones in the subscription $SubscriptionId`n"
 
-:loop1 foreach($privateZone in $privateZones)
+# Migrate phase.
+Write-Host "Migrating legacy Private DNS zones to the new model...`n"
+
+:loop1 foreach($legacyPrivateZone in $legacyPrivateZones)
 {
     do 
     {
-        Write-Host -ForegroundColor Green "Do you want to migrate the following privatezone?"
-        Write-Output $privateZone
+        Write-Host -ForegroundColor Green "Do you want to migrate the following legacy privatezone?"
+        Write-Output $legacyPrivateZone
         Write-Host -ForegroundColor Green "[Y] Yes  [A] Yes to All  [N] No  [L] No to All  [S] Suspend  [?] Help:`n"
         $confirmation = Read-Host
 
         switch ($confirmation.ToUpper()) 
         {
             'L' { break loop1 ; break }
-            'A' { MigrateAllPrivateZones $privateZones ; break loop1 }
+            'A' { MigrateAllPrivateZones $legacyPrivateZones ; break loop1 }
             'N' { break }
-            'Y' { MigrateSinglePrivateZone $privateZone ; break }
+            'Y' { MigrateSinglePrivateZone $legacyPrivateZone ; break }
             'S' { pause }
-            '?' {Write-Host $helpmsg ; break}
+            '?' { Write-Host $helpmsg ; break }
         }
     } until ($choice -contains $confirmation)
 }
 
 
-#switch phase
+# Switch phase
 Write-Host "Attempting to switch DNS resolution to the new model...`n"
 
-:loop2 foreach($privateZone in $privateZones)
+foreach($legacyPrivateZone in $legacyPrivateZones)
 {
-    $fileName = "$($privatezone.ResourceGroupName)-$($privatezone.Name)-switch.txt"
-    Out-File -FilePath "ZoneData/$fileName"
-    Write-Host "Switching DNS resolution for the Private DNS Zone $($privateZone.Name) with the following properties:"
-    Write-Output $privateZone
-    $resolutionVnetIds = $privateZone.ResolutionVirtualNetworkIds
+    $fileName = "$($legacyPrivateZone.ResourceGroupName)-$($legacyPrivateZone.Name)-switch.txt"
+    $legacyPrivateZone | Out-File -FilePath "$DumpPath/$fileName"
+    Write-Host "Switching DNS resolution for the Private DNS Zone $($legacyPrivateZone.Name) with the following properties:"
+    Write-Output $legacyPrivateZone
+    $resolutionVnetIds = $legacyPrivateZone.ResolutionVirtualNetworkIds
     $firstId , $restIds = $resolutionVnetIds
-    while(!($null -eq $firstId))
+    :loop2 while($firstId)
     {
-        $name = $firstId.Split('/')[-1] + "-Link"
-        $resolutionVnetLink = Get-AzPrivateDnsVirtualNetworkLink -Name $name -ZoneName $privateZone.Name -ResourceGroupName $privateZone.ResourceGroupName
-        Assert-AreEqual  $resolutionVnetLink.VirtualNetworkId $firstId
-        Assert-AreEqual $resolutionVnetLink.RegistrationEnabled $false
-        Assert-AreEqual $resolutionVnetLink.ProvisioningState "Succeeded"
+        $name = CreateVirtualNetworkLinkName $firstId
+        $resolutionVnetLink = Get-AzPrivateDnsVirtualNetworkLink -Name $name -ZoneName $legacyPrivateZone.Name -ResourceGroupName $legacyPrivateZone.ResourceGroupName
+        if(!($resolutionVnetLink.VirtualNetworkId -like $firstId))
+        {
+            Write-Host "Virtual Network Ids associated to the resolution virtual network link $($resolutionVnetLink.Name) from legacy and new Private DNS zone do not match. $($resolutionVnetLink.VirtualNetworkId) did not match $($firstId).`n"
+            Exit-PSSession
+        }
 
-        if(RemoveVirtualNetworkFromPrivateZone $privateZone $firstId $restIds $false)
+        if($resolutionVnetLink.RegistrationEnabled -eq $true)
+        {
+            Write-Host "The virtual network link $($resolutionVnetLink.Name) under the Private DNS zone $($legacyPrivateZone.Name) was expected to be a resolution link, but was unexpectedly found to be auto-registration enabled.`n"
+            Exit-PSSession
+        }
+
+        if($resolutionVnetLink.ProvisioningState -ne "Succeeded")
+        {
+            Write-Host "The resolution virtual network link $($resolutionVnetLink.Name) under the Private DNS zone $($legacyPrivateZone.Name) is not in a Succeeded provisioning state as was expected.`n"
+            Exit-PSSession
+        }
+
+        if($resolutionVnetLink.VirtualNetworkLinkState -ne "Completed")
+        {
+            Write-Host "The resolution virtual network link $($resolutionVnetLink.Name) under the Private DNS zone $($legacyPrivateZone.Name) is not in a Completed linking state as was expected.`n"
+            Exit-PSSession
+        }
+
+        if(RemoveVirtualNetworkFromPrivateZone $legacyPrivateZone $firstId $restIds $false)
         {
             break loop2
         }
@@ -358,20 +642,39 @@ Write-Host "Attempting to switch DNS resolution to the new model...`n"
         $firstId , $restIds = $restIds
     }
 
-    $registrationVnetIds = $privateZone.RegistrationVirtualNetworkIds
+    $registrationVnetIds = $legacyPrivateZone.RegistrationVirtualNetworkIds
     $firstId , $restIds = $registrationVnetIds
-    while(!($null -eq $firstId))
+    :loop3 while($firstId)
     {
-        $name = $firstId.Split('/')[-1] + "-Link"
-        $registrationVnetLink = Get-AzPrivateDnsVirtualNetworkLink -Name $name -ZoneName $privateZone.Name -ResourceGroupName $privateZone.ResourceGroupName
-        Assert-AreEqual  $registrationVnetLink.VirtualNetworkId $firstId
-        Assert-AreEqual $registrationVnetLink.RegistrationEnabled $true
-        Assert-AreEqual $registrationVnetLink.ProvisioningState "Succeeded"
-        Assert-AreEqual $registrationVnetLink.VirtualNetworkLinkState "Completed"
-
-        if(RemoveVirtualNetworkFromPrivateZone $privateZone $firstId $restIds $true)
+        $name = CreateVirtualNetworkLinkName $firstId
+        $registrationVnetLink = Get-AzPrivateDnsVirtualNetworkLink -Name $name -ZoneName $legacyPrivateZone.Name -ResourceGroupName $legacyPrivateZone.ResourceGroupName
+        if(!($registrationVnetLink.VirtualNetworkId -like $firstId))
         {
-            break loop2
+            Write-Host "Virtual Network Ids associated to the registration virtual network link $($registrationVnetLink.Name) from legacy and new Private DNS zone do not match. $($registrationVnetLink.VirtualNetworkId) did not match $($firstId).`n"
+            Exit-PSSession
+        }
+
+        if($registrationVnetLink.RegistrationEnabled -eq $false)
+        {
+            Write-Host "The virtual network link $($registrationVnetLink.Name) under the Private DNS zone $($legacyPrivateZone.Name) was expected to be a registration link, but was found to be resolution instead.`n"
+            Exit-PSSession
+        }
+
+        if($registrationVnetLink.ProvisioningState -ne "Succeeded")
+        {
+            Write-Host "The registration virtual network link $($registrationVnetLink.Name) under the Private DNS zone $($legacyPrivateZone.Name) is not in a Succeeded provisioning state as was expected.`n"
+            Exit-PSSession
+        }
+
+        if($registrationVnetLink.VirtualNetworkLinkState -ne "Completed")
+        {
+            Write-Host "The registration virtual network link $($registrationVnetLink.Name) under the Private DNS zone $($legacyPrivateZone.Name) is not in a Completed linking state as was expected.`n"
+            Exit-PSSession
+        }
+
+        if(RemoveVirtualNetworkFromPrivateZone $legacyPrivateZone $firstId $restIds $true)
+        {
+            break loop3
         }
 
         $firstId , $restIds = $restIds
@@ -379,37 +682,42 @@ Write-Host "Attempting to switch DNS resolution to the new model...`n"
 }
 
 
-#cleanup
-Write-Host "Entering cleanup phase to remove all Private DNS Zones post migration and DNS resolution switch...`n"
+# Cleanup phase.
+Write-Host "Entering cleanup phase to remove all legacy Private DNS Zones post migration and DNS resolution switch...`n"
 
-:loop3 foreach($privateZone in $privateZones)
+foreach($legacyPrivateZone in $legacyPrivateZones)
 {
-    $privateZone = Get-AzDnsZone -Name $privateZone.Name -ResourceGroupName $privateZone.ResourceGroupName
-    if($privateZone.RegistrationVirtualNetworkIds.Count -gt 0 -or $privateZone.ResolutionVirtualNetworkIds.Count -gt 0)
+    $legacyPrivateZone = Get-AzDnsZone -Name $legacyPrivateZone.Name -ResourceGroupName $legacyPrivateZone.ResourceGroupName
+    if($legacyPrivateZone.RegistrationVirtualNetworkIds.Count -gt 0 -or $legacyPrivateZone.ResolutionVirtualNetworkIds.Count -gt 0)
     {
-        Write-Error "Found $($privateZone.RegistrationVirtualNetworkIds.Count) Registration Virtual Networks and $($privateZone.ResolutionVirtualNetworkIds.Count) Resolution Virtual Networks in the private zone. Please migrate all virtual networks before this private zone can be removed.`n"
+        Write-Error "Found $($legacyPrivateZone.RegistrationVirtualNetworkIds.Count) Registration Virtual Networks and $($legacyPrivateZone.ResolutionVirtualNetworkIds.Count) Resolution Virtual Networks in the private zone $($legacyPrivateZone.Name). Please migrate all virtual networks before this private zone can be removed.`n"
         continue
     }
 
-    $fileName = "$($privatezone.ResourceGroupName)-$($privatezone.Name)-cleanup.txt"
-    Out-File -FilePath "ZoneData/$fileName"
-    $migratedZone = Get-AzPrivateDnsZone -Name $privateZone.Name -ResourceGroupName $privateZone.ResourceGroupName
-    Assert-AreEqual $migratedZone.NumberOfRecordSets $privateZone.NumberOfRecordSets
+    $fileName = "$($legacyPrivatezone.ResourceGroupName)-$($legacyPrivatezone.Name)-cleanup.txt"
+    $legacyPrivateZone | Out-File -FilePath "$DumpPath/$fileName"
+    $migratedZone = Get-AzPrivateDnsZone -Name $legacyPrivateZone.Name -ResourceGroupName $legacyPrivateZone.ResourceGroupName
+    if($migratedZone.NumberOfRecordSets -ne $legacyPrivateZone.NumberOfRecordSets)
+    {
+        Write-Host "Number of recordSets in legacy and new Private DNS zone $($legacyPrivatezone.Name) are not equal.`n"
+        Exit-PSSession
+    }
     
     do {
-        Write-Host -ForegroundColor Yellow "Are you sure you want to delete the Private DNS zone?"
-        Write-Output $privateZone
-        Write-Host -ForegroundColor Yellow "This action is irreversible and will cause all the corresponding record sets to be deleted as well. Please note that this zone has already been migrated to the new model and DNS resolution has been switched to use the virtual network links resource model.`n[Y] Yes  [A] Yes to All  [N] No  [L] No to All  [S] Suspend  [?] Help:`n"
+        Write-Host -ForegroundColor Yellow "Are you sure you want to delete the legacy Private DNS zone?"
+        Write-Output $legacyPrivateZone
+        Write-Host -ForegroundColor Yellow "This action is irreversible and will cause all the corresponding record sets to be deleted as well. Please note that this zone has already been migrated to the new model and DNS resolution has been switched to use the virtual network links resource model.`n[Y] Yes  [N] No  [L] No to All  [S] Suspend  [?] Help:`n"
         
         $confirmation = Read-Host
         switch ($confirmation.ToUpper()) 
         {
             'L' { Exit-PSSession }
-            'A' { DeleteAllPrivateZones $privateZones ; break loop3 }
             'N' { break }
-            'Y' { DeleteSinglePrivateZone $privateZone ; break }
+            'Y' { DeleteSinglePrivateZone $legacyPrivateZone ; break }
             'S' { pause }
-            '?' {Write-Host $helpmsg ; break}
+            '?' { Write-Host $helpmsg ; break }
         }
     } until ($choice -contains $confirmation)
 }
+
+Stop-Transcript
