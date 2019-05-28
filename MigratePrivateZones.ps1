@@ -14,6 +14,7 @@
 param(
     [Parameter(Mandatory=$true)] [ValidateNotNullOrEmpty()] [string] $SubscriptionId,
     [Parameter(Mandatory=$false)] [ValidateNotNullOrEmpty()] [string] $DumpPath = "$env:temp\PrivateZoneData",
+    [Parameter(Mandatory=$false)] [ValidateNotNullOrEmpty()] [string] $ResourceGroupName,
     [Parameter(Mandatory=$false)] [switch] $Force
 )
 
@@ -21,10 +22,6 @@ $ErrorActionPreference = "Stop"
 
 Import-Module Az.Dns
 Import-Module Az.PrivateDns
-
-Set-Alias -Name Set-AzPrivateDnsZone -Value Update-AzPrivateDnsZone
-Set-Alias -Name Set-AzPrivateDnsRecordSet -Value Update-AzPrivateDnsRecordSet
-Set-Alias -Name Set-AzPrivateDnsVirtualNetworkLink -Value Update-AzPrivateDnsVirtualNetworkLink
 
 $helpmsg = '''
 Y - Continue with only the next step of the operation.
@@ -547,7 +544,15 @@ else
 Start-Transcript -path "$DumpPath\transcript.txt" -append
 
 Login-AzAccount -Subscription $SubscriptionId | Out-Null
-$legacyPrivateZones = Get-AzDnsZone | Where-Object { $_.ZoneType -eq "Private" }
+
+if($ResourceGroupName)
+{
+    $legacyPrivateZones = Get-AzDnsZone -ResourceGroupName $ResourceGroupName | Where-Object { $_.ZoneType -eq "Private" }
+}
+else 
+{
+    $legacyPrivateZones = Get-AzDnsZone | Where-Object { $_.ZoneType -eq "Private" }
+}
 
 if($legacyPrivateZones.Count -eq 0)
 {
