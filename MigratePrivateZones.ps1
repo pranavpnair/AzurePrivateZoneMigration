@@ -1,7 +1,7 @@
 
 <#PSScriptInfo
 
-.VERSION 1.2
+.VERSION 1.3
 
 .GUID 98d9382c-262f-49a3-8e73-2026f85e82b2
 
@@ -490,7 +490,7 @@ function RemoveVirtualNetworkFromPrivateZone($privateZone, $firstId, $restIds, $
 
     $privateZone = Get-AzDnsZone -Name $privateZone.Name -ResourceGroupName $privateZone.ResourceGroupName
     do {
-        Write-Host -ForegroundColor Green "Do you want to remove the virtual network $firstId with auto-registration property $isRegistration from the Private DNS Zone $($privateZone.Name)?"
+        Write-Host -ForegroundColor Green "Do you want to remove the virtual network $firstId with auto-registration property $isRegistration from the legacy Private DNS Zone $($privateZone.Name)?"
         Write-Host -ForegroundColor Green "[Y] Yes  [A] Yes to All  [N] No  [L] No to All  [S] Suspend  [?] Help:`n"   
         $confirmation = Read-Host
 
@@ -659,12 +659,6 @@ foreach($legacyPrivateZone in $legacyPrivateZones)
             Exit
         }
 
-        if($resolutionVnetLink.VirtualNetworkLinkState -ne "Completed")
-        {
-            Write-Host "The resolution virtual network link $($resolutionVnetLink.Name) under the Private DNS zone $($legacyPrivateZone.Name) is not in a Completed linking state as was expected.`n"
-            Exit
-        }
-
         if(RemoveVirtualNetworkFromPrivateZone $legacyPrivateZone $firstId $restIds $false)
         {
             break loop2
@@ -699,8 +693,19 @@ foreach($legacyPrivateZone in $legacyPrivateZones)
 
         if($registrationVnetLink.VirtualNetworkLinkState -ne "Completed")
         {
-            Write-Host "The registration virtual network link $($registrationVnetLink.Name) under the Private DNS zone $($legacyPrivateZone.Name) is not in a Completed linking state as was expected.`n"
-            Exit
+            $elapsedTime = 0
+            do
+            {
+                Start-Sleep -s 10
+                $elapsedTime += 10
+                $registrationVnetLink = Get-AzPrivateDnsVirtualNetworkLink -Name $name -ZoneName $legacyPrivateZone.Name -ResourceGroupName $legacyPrivateZone.ResourceGroupName
+            } while($registrationVnetLink.VirtualNetworkLinkState -ne "Completed" -and $elapsedTime -lt 300)
+
+            if($registrationVnetLink.VirtualNetworkLinkState -ne "Completed")
+            {
+                Write-Host "The registration virtual network link $($registrationVnetLink.Name) under the Private DNS zone $($legacyPrivateZone.Name) was not in a Completed link state as was expected.`n"
+                Exit
+            }
         }
 
         if(RemoveVirtualNetworkFromPrivateZone $legacyPrivateZone $firstId $restIds $true)
