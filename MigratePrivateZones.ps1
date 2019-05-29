@@ -7,6 +7,7 @@
 # <PARAMETERS>
 # SubsciptionId: (Mandatory) Enter the subscription ID where the migration of Private DNS zones from legacy to new model needs to happen. 
 # DumpPath: (Not Mandatory) Enter the dump location that this script will use to dump Private DNS zone data. 
+# ResourceGroupName: (Not Mandatory) Enter the resource group containing the zones you wish to migrate.
 # Force: (Not Mandatory) Switch parameter, please use this is you have filed a support request and subscription limits have been already increased.
 # --------------------------------------------------------------------------------------------------------------------------------------------------
 
