@@ -1,7 +1,7 @@
 
 <#PSScriptInfo
 
-.VERSION 1.3
+.VERSION 1.4
 
 .GUID 98d9382c-262f-49a3-8e73-2026f85e82b2
 
@@ -36,6 +36,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+if(![string]::IsNullOrEmpty($PrivateZoneName) -and [string]::IsNullOrEmpty($ResourceGroupName))
+{
+    Write-Host "Private DNS zone name was provided but no resource group name was provided to the script. Please re-run the script with a resource group name.`n"
+    Exit
+}
 
 Import-Module Az.Dns
 Import-Module Az.PrivateDns
@@ -570,11 +576,6 @@ elseif(![string]::IsNullOrEmpty($ResourceGroupName))
 {
     $legacyPrivateZones = Get-AzDnsZone -ResourceGroupName $ResourceGroupName | Where-Object { $_.ZoneType -eq "Private" }
 }
-elseif(![string]::IsNullOrEmpty($PrivateZoneName))
-{
-    Write-Host "Private DNS zone name was provided but no resource group name was provided to the script. Please re-run the script with a resource group name.`n"
-    Exit
-}
 else 
 {
     $legacyPrivateZones = Get-AzDnsZone | Where-Object { $_.ZoneType -eq "Private" }
@@ -691,21 +692,18 @@ foreach($legacyPrivateZone in $legacyPrivateZones)
             Exit
         }
 
+        $elapsedTime = 0
+        do
+        {
+            Start-Sleep -s 10
+            $elapsedTime += 10
+            $registrationVnetLink = Get-AzPrivateDnsVirtualNetworkLink -Name $name -ZoneName $legacyPrivateZone.Name -ResourceGroupName $legacyPrivateZone.ResourceGroupName
+        } while($registrationVnetLink.VirtualNetworkLinkState -ne "Completed" -and $elapsedTime -lt 300)
+
         if($registrationVnetLink.VirtualNetworkLinkState -ne "Completed")
         {
-            $elapsedTime = 0
-            do
-            {
-                Start-Sleep -s 10
-                $elapsedTime += 10
-                $registrationVnetLink = Get-AzPrivateDnsVirtualNetworkLink -Name $name -ZoneName $legacyPrivateZone.Name -ResourceGroupName $legacyPrivateZone.ResourceGroupName
-            } while($registrationVnetLink.VirtualNetworkLinkState -ne "Completed" -and $elapsedTime -lt 300)
-
-            if($registrationVnetLink.VirtualNetworkLinkState -ne "Completed")
-            {
-                Write-Host "The registration virtual network link $($registrationVnetLink.Name) under the Private DNS zone $($legacyPrivateZone.Name) was not in a Completed link state as was expected.`n"
-                Exit
-            }
+            Write-Host "The virtual network link $($registrationVnetLink.Name) with auto-registration enabled under the Private DNS zone $($legacyPrivateZone.Name) did not reach a Completed link state in designated time as expected.`n"
+            Exit
         }
 
         if(RemoveVirtualNetworkFromPrivateZone $legacyPrivateZone $firstId $restIds $true)
@@ -733,9 +731,9 @@ foreach($legacyPrivateZone in $legacyPrivateZones)
     $fileName = "$($legacyPrivatezone.ResourceGroupName)-$($legacyPrivatezone.Name)-cleanup.txt"
     $legacyPrivateZone | Out-File -FilePath "$DumpPath/$fileName"
     $migratedZone = Get-AzPrivateDnsZone -Name $legacyPrivateZone.Name -ResourceGroupName $legacyPrivateZone.ResourceGroupName
-    if($migratedZone.NumberOfRecordSets -ne $legacyPrivateZone.NumberOfRecordSets)
+    if($migratedZone.NumberOfRecordSets -lt $legacyPrivateZone.NumberOfRecordSets)
     {
-        Write-Host "Number of recordSets in legacy and new Private DNS zone $($legacyPrivatezone.Name) are not equal.`n"
+        Write-Host "All record sets from legacy Private DNS zone $($legacyPrivatezone.Name) were not migrated.`n"
         Exit
     }
     
